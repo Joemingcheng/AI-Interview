@@ -3,13 +3,18 @@
 // 所以必須標記 "use client"，讓 Next.js 把它當成 Client Component 而不是 Server Component。
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 // 這三個常數要跟後端 /api/interview/route.ts 裡的設定一致，
 // 用來限制與顯示「題數輸入框」的預設值與上下限。
 const DEFAULT_TOTAL_QUESTIONS = 3;
 const MIN_TOTAL_QUESTIONS = 1;
 const MAX_TOTAL_QUESTIONS = 10;
+
+// 這個工具採用 BYOK（Bring Your Own Key）模式：
+// 使用者自己的 OpenAI API Key 只會存在瀏覽器的 localStorage，
+// 用這個 key 名稱存取，每次打 /api/interview 時用 Authorization header 帶過去。
+const API_KEY_STORAGE_KEY = "ai-interview:openai-api-key";
 
 // 對話紀錄裡一筆資料的型別：
 // assistant = 面試官的提問、user = 應徵者的回答
@@ -48,6 +53,69 @@ export default function InterviewPage() {
   // 呼叫 API 失敗時的錯誤訊息，null 代表目前沒有錯誤
   const [error, setError] = useState<string | null>(null);
 
+  // 使用者自己的 OpenAI API Key（BYOK）。
+  // 初始值先給空字串，實際的值要等瀏覽器端的 useEffect 從 localStorage 讀出來才會填入，
+  // 這樣才不會在伺服器端渲染（SSR）時去存取只存在瀏覽器裡的 localStorage。
+  const [apiKey, setApiKey] = useState("");
+  // 設定面板目前輸入到一半、還沒按下「儲存」的草稿值，
+  // 跟 apiKey 分開存是為了避免使用者打字打到一半，就有未儲存的字串被拿去打 API
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  // 右上角「API Key 設定」面板是否展開
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // 頁面載入後（只在瀏覽器端執行一次），嘗試從 localStorage 讀出之前存過的 API Key。
+  // localStorage 是瀏覽器才有的外部系統，伺服器端渲染時讀不到，
+  // 所以必須等 mount 後才能同步這個值，這裡用 effect 屬於合理例外，故關掉下面這條 lint 規則。
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(API_KEY_STORAGE_KEY);
+      if (stored) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- mount 後讀取 localStorage 這個外部系統，必須用 effect 同步
+        setApiKey(stored);
+        setApiKeyDraft(stored);
+      }
+    } catch {
+      // localStorage 在某些情境下可能讀不到（例如無痕模式、瀏覽器設定封鎖），
+      // 讀不到就當作使用者還沒設定過，不用特別處理錯誤
+    }
+  }, []);
+
+  // 使用者在設定面板按下「儲存」時觸發：把草稿值存進 state 跟 localStorage，並關閉面板
+  function handleSaveApiKey() {
+    const trimmed = apiKeyDraft.trim();
+    setApiKey(trimmed);
+    try {
+      if (trimmed) {
+        window.localStorage.setItem(API_KEY_STORAGE_KEY, trimmed);
+      } else {
+        window.localStorage.removeItem(API_KEY_STORAGE_KEY);
+      }
+    } catch {
+      // 存不進 localStorage 也沒關係，apiKey state 這次 session 內還是可以正常使用
+    }
+    setSettingsOpen(false);
+  }
+
+  // 使用者在設定面板按下「清除」時觸發：清掉已儲存的 key
+  function handleClearApiKey() {
+    setApiKey("");
+    setApiKeyDraft("");
+    try {
+      window.localStorage.removeItem(API_KEY_STORAGE_KEY);
+    } catch {
+      // 同上，清不掉 localStorage 也不影響這次 session 的狀態
+    }
+  }
+
+  // 呼叫 API 前先確認使用者有沒有設定 API Key，
+  // 沒有的話就跳出錯誤訊息，並自動展開設定面板引導使用者輸入
+  function ensureApiKey(): boolean {
+    if (apiKey.trim()) return true;
+    setError("請先在右上角設定輸入你的 OpenAI API Key");
+    setSettingsOpen(true);
+    return false;
+  }
+
   // 統一封裝「呼叫 /api/interview」的邏輯，避免在 handleStart / handleSubmitAnswer
   // 重複寫 fetch 的程式碼。
   // 參數 nextHistory：呼叫當下「最新」的對話紀錄（因為 setState 是非同步的，
@@ -55,7 +123,12 @@ export default function InterviewPage() {
   async function callInterviewApi(nextHistory: ChatTurn[]) {
     const res = await fetch("/api/interview", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        // 使用者自己的 OpenAI API Key 透過這個 header 帶給後端，
+        // 後端收到後只會在這次請求裡用一下，不會儲存
+        Authorization: `Bearer ${apiKey}`,
+      },
       body: JSON.stringify({
         jobDescription,
         history: nextHistory,
@@ -86,6 +159,7 @@ export default function InterviewPage() {
     // 職缺描述是空白或正在 loading 中就不處理，避免重複點擊
     if (!jobDescription.trim() || loading) return;
     setError(null);
+    if (!ensureApiKey()) return;
     setLoading(true);
     try {
       // 一開始對話紀錄是空陣列，後端看到空陣列就知道「這是第一次呼叫」，
@@ -110,6 +184,7 @@ export default function InterviewPage() {
   async function handleSubmitAnswer() {
     if (!answer.trim() || loading) return;
     setError(null);
+    if (!ensureApiKey()) return;
     setLoading(true);
 
     // 先把這次的回答（role: "user"）接到既有的對話紀錄後面，
@@ -166,7 +241,7 @@ export default function InterviewPage() {
   return (
     <div className="flex flex-1 flex-col bg-gradient-to-b from-indigo-50/60 via-white to-white dark:from-indigo-950/20 dark:via-black dark:to-black">
       {/* App 內的頂部列：跟行銷首頁共用品牌識別，但這裡是精簡版工具列，
-          方便使用者隨時回到首頁 */}
+          方便使用者隨時回到首頁，以及隨時打開右上角的 API Key 設定 */}
       <header className="sticky top-0 z-10 border-b border-zinc-200/70 bg-white/80 backdrop-blur dark:border-zinc-800/70 dark:bg-black/60">
         <div className="mx-auto flex w-full max-w-2xl items-center justify-between px-6 py-4">
           <Link
@@ -178,12 +253,73 @@ export default function InterviewPage() {
             </span>
             面試模擬器
           </Link>
-          <Link
-            href="/"
-            className="text-xs font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            ← 返回首頁
-          </Link>
+
+          <div className="flex items-center gap-4">
+            {/* API Key 設定按鈕 + 下拉面板。relative 容器讓面板可以用 absolute 定位在按鈕下方 */}
+            <div className="relative">
+              <button
+                onClick={() => {
+                  // 打開面板時，把草稿值重設成目前已儲存的 key，避免殘留上次沒存的草稿
+                  setApiKeyDraft(apiKey);
+                  setSettingsOpen((open) => !open);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-full border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
+              >
+                <span
+                  aria-hidden
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    apiKey.trim() ? "bg-emerald-500" : "bg-amber-500"
+                  }`}
+                />
+                API Key
+              </button>
+
+              {settingsOpen && (
+                <div className="absolute right-0 top-full z-20 mt-2 w-72 rounded-xl border border-zinc-200 bg-white p-4 shadow-lg dark:border-zinc-800 dark:bg-zinc-950">
+                  <label
+                    htmlFor="openai-api-key"
+                    className="text-xs font-semibold text-zinc-700 dark:text-zinc-300"
+                  >
+                    OpenAI API Key
+                  </label>
+                  <input
+                    id="openai-api-key"
+                    type="password"
+                    autoComplete="off"
+                    value={apiKeyDraft}
+                    onChange={(e) => setApiKeyDraft(e.target.value)}
+                    placeholder="sk-..."
+                    className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-indigo-400"
+                  />
+                  <p className="mt-2 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                    只會存在你瀏覽器的 localStorage，不會上傳或儲存到我們的伺服器；呼叫
+                    OpenAI 的費用依你的帳號用量計算。
+                  </p>
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      onClick={handleSaveApiKey}
+                      className="inline-flex flex-1 items-center justify-center rounded-full bg-gradient-to-r from-indigo-600 to-fuchsia-500 px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90"
+                    >
+                      儲存
+                    </button>
+                    <button
+                      onClick={handleClearApiKey}
+                      className="inline-flex items-center justify-center rounded-full border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                    >
+                      清除
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <Link
+              href="/"
+              className="text-xs font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+            >
+              ← 返回首頁
+            </Link>
+          </div>
         </div>
       </header>
 
@@ -208,6 +344,13 @@ export default function InterviewPage() {
           {/* === 畫面一：setup，填職缺描述 + 選題數 === */}
           {phase === "setup" && (
             <div className="flex flex-col gap-3 rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+              {/* 還沒設定 API Key 時，提醒使用者先去右上角設定 */}
+              {!apiKey.trim() && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+                  請先點選右上角「API Key」設定你的 OpenAI API Key，才能開始模擬面試。
+                </div>
+              )}
+
               <label
                 htmlFor="job-description"
                 className="text-sm font-medium text-zinc-700 dark:text-zinc-300"
@@ -255,7 +398,7 @@ export default function InterviewPage() {
 
               <button
                 onClick={handleStart}
-                disabled={!jobDescription.trim() || loading}
+                disabled={!jobDescription.trim() || !apiKey.trim() || loading}
                 className="group mt-2 inline-flex w-fit items-center gap-2 self-start rounded-full bg-gradient-to-r from-indigo-600 to-fuchsia-500 px-5 py-2.5 text-sm font-medium text-white shadow-sm transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {loading ? "準備題目中..." : "開始模擬面試"}

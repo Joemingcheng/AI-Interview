@@ -40,16 +40,28 @@ function resolveTotalQuestions(value: unknown): number {
   return Math.min(Math.max(rounded, MIN_TOTAL_QUESTIONS), MAX_TOTAL_QUESTIONS);
 }
 
+// 這支 API 採用 BYOK（Bring Your Own Key）模式：
+// 伺服器不保管任何 OpenAI API Key，金鑰完全由使用者自己在前端輸入、
+// 存在瀏覽器的 localStorage，每次呼叫這支 API 時透過 Authorization header 帶過來。
+// 這個 function 負責從 header 把 key 取出來並做基本格式檢查。
+function extractApiKey(req: NextRequest): string | null {
+  const authHeader = req.headers.get("authorization");
+  if (!authHeader?.startsWith("Bearer ")) return null;
+  const key = authHeader.slice("Bearer ".length).trim();
+  return key || null;
+}
+
 // 前端只會打這一支 POST，依照目前對話進度決定要做什麼事：
 // 1. 還沒問滿題數 → 出下一題
 // 2. 已經問滿題數 → 改成給評分報告
 export async function POST(req: NextRequest) {
-  // 先檢查伺服器有沒有設定 OPENAI_API_KEY（讀自 .env.local），
-  // 沒有的話就直接回 500，不用浪費力氣往下執行
-  if (!process.env.OPENAI_API_KEY) {
+  // 從 Authorization header 取出使用者自己的 OpenAI API Key，
+  // 沒帶 key 就直接擋掉，不用浪費力氣往下執行
+  const apiKey = extractApiKey(req);
+  if (!apiKey) {
     return NextResponse.json(
-      { error: "伺服器未設定 OPENAI_API_KEY" },
-      { status: 500 },
+      { error: "請先在設定中輸入你的 OpenAI API Key" },
+      { status: 401 },
     );
   }
 
@@ -89,8 +101,9 @@ export async function POST(req: NextRequest) {
   // 例如：answeredCount = 2，代表應徵者已經回答了第 1、2 題。
   const answeredCount = safeHistory.filter((h) => h.role === "user").length;
 
-  // 建立 OpenAI 的 client，用伺服器端的 API 金鑰（不會暴露給前端瀏覽器）
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  // 建立 OpenAI 的 client，用「使用者自己帶來的」API 金鑰，
+  // 這支 key 只在這次請求裡用一下，伺服器不會儲存它
+  const client = new OpenAI({ apiKey });
 
   // 把自訂的 ChatTurn 格式轉成 OpenAI chat.completions 要求的訊息格式
   // （其實欄位長得一樣，這裡主要是確保型別符合 SDK 的要求）
@@ -186,9 +199,17 @@ ${jobDescription}
       totalQuestions: safeTotalQuestions,
     });
   } catch (err) {
-    // 呼叫 OpenAI 失敗（例如額度用完、網路問題、金鑰錯誤等）時，
-    // 記錄錯誤到伺服器 log，並回傳 502 讓前端顯示錯誤訊息，而不是讓整個請求掛掉
+    // 呼叫 OpenAI 失敗時，記錄錯誤到伺服器 log 方便除錯，
+    // 並依錯誤類型回傳不同訊息：
+    // - OpenAI 說 key 無效/過期（401）→ 明確告訴使用者是 key 的問題
+    // - 其他錯誤（額度用完、網路問題等）→ 統一回傳 502
     console.error("/api/interview error", err);
+    if (err instanceof OpenAI.APIError && err.status === 401) {
+      return NextResponse.json(
+        { error: "OpenAI API Key 無效或已過期，請重新確認後再輸入一次" },
+        { status: 401 },
+      );
+    }
     return NextResponse.json(
       { error: "呼叫 OpenAI API 時發生錯誤，請稍後再試" },
       { status: 502 },

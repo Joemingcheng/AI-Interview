@@ -119,7 +119,11 @@ const FAQS = [
   },
   {
     q: "需要自己申請 OpenAI API Key 或額外付費嗎？",
-    a: "不需要。系統已經設定好，你只要貼上職缺描述就可以直接開始使用。",
+    a: "需要。本工具採用 BYOK（Bring Your Own Key）模式，請在 /interview 右上角的設定輸入你自己的 OpenAI API Key，費用依你 OpenAI 帳號的實際用量計費，我們不會向你額外收費。",
+  },
+  {
+    q: "我的 API Key 安全嗎？會不會被你們存起來？",
+    a: "Key 只會存在你瀏覽器的 localStorage，不會傳到我們的伺服器保存；每次出題或評分時才會用 Authorization header 帶給我們的 API，用完即丟。",
   },
   {
     q: "只能練習工程師職缺嗎？",
@@ -225,7 +229,7 @@ export default function LandingPage() {
               </div>
 
               <p className="text-xs text-zinc-400 dark:text-zinc-500">
-                不用註冊，不用自備 API Key，貼上職缺就能開始。
+                不用註冊，輸入你自己的 OpenAI API Key 即可開始，Key 只存在你的瀏覽器。
               </p>
             </div>
 
@@ -410,7 +414,7 @@ export default function LandingPage() {
               下一場真實面試之前，先在這裡演練一次。
             </h2>
             <p className="max-w-xl text-indigo-100">
-              不用註冊、不用安裝，貼上職缺描述，三分鐘內開始你的第一場模擬面試。
+              不用註冊、不用安裝，準備好你的 OpenAI API Key，三分鐘內開始你的第一場模擬面試。
             </p>
             <Link
               href="/interview"
